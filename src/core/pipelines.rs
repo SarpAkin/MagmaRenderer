@@ -370,12 +370,12 @@ macro_rules! auto_description {
             $($field : $type,)*
         }
 
-        impl vk_ash_engine::core::VertexDescription for $type_name {
-            fn get_desciption() -> vk_ash_engine::core::VertexInputDescriptionBuilder {
+        impl magma_renderer::core::VertexDescription for $type_name {
+            fn get_desciption() -> magma_renderer::core::VertexInputDescriptionBuilder {
                 use ash::vk;
                 use bytemuck::offset_of;
 
-                let mut builder = vk_ash_engine::core::VertexInputDescriptionBuilder::new();
+                let mut builder = magma_renderer::core::VertexInputDescriptionBuilder::new();
                 let vert = $type_name::zeroed();
                 builder.push_binding::<$type_name>(vk::VertexInputRate::VERTEX);
                 $(

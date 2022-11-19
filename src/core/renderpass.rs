@@ -10,7 +10,7 @@ use eyre::Result;
 
 use super::{
     core::{Core, Surface},
-    Image,
+    is_depth_format, Image,
 };
 
 enum AttachmentType {
@@ -310,3 +310,324 @@ impl SurfaceRenderpass {
 // impl dyn Renderpass {
 //     fn new_singlepass(core: Arc<Core>, attachments: Vec<Attachment>, depth_attachment: Option<Attachment>) {}
 // }
+
+struct AttachmentInfo {
+    description: vk::AttachmentDescription,
+    sampled: bool,
+    is_input_attachment: bool,
+}
+
+struct SubpassDescription {
+    attachments: Vec<vk::AttachmentReference>,
+    depth_attachment: Option<vk::AttachmentReference>,
+    input_attachments: Vec<vk::AttachmentReference>,
+}
+
+impl SubpassDescription {
+    fn get_description(&self) -> vk::SubpassDescription {
+        let builder = vk::SubpassDescription::builder()
+            .color_attachments(&self.attachments)
+            .input_attachments(&self.input_attachments);
+
+        if let Some(d) = &self.depth_attachment { builder.depth_stencil_attachment(d).build() } else { builder.build() }
+    }
+}
+
+pub struct RenderPassBuilder {
+    attachments: Vec<AttachmentInfo>,
+    subpasses: Vec<SubpassDescription>,
+    clear_values: Vec<vk::ClearValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttachmentIndex(u32);
+
+impl RenderPassBuilder {
+    pub fn new() -> RenderPassBuilder { Self { attachments: vec![], subpasses: vec![], clear_values: vec![] } }
+
+    pub fn add_attachment(
+        &mut self,
+        format: vk::Format,
+        clear_value: Option<vk::ClearValue>,
+        is_sampled: bool,
+    ) -> AttachmentIndex {
+        self.attachments.push(AttachmentInfo {
+            description: vk::AttachmentDescription {
+                flags: vk::AttachmentDescriptionFlags::empty(),
+                format,
+                samples: vk::SampleCountFlags::TYPE_1,
+                load_op: if let Some(_) = clear_value {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                },
+                store_op: vk::AttachmentStoreOp::STORE,
+                stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+                initial_layout: vk::ImageLayout::UNDEFINED,
+                final_layout: if is_sampled {
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+                } else {
+                    if is_depth_format(format) {
+                        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                    } else {
+                        vk::ImageLayout::ATTACHMENT_OPTIMAL
+                    }
+                },
+            },
+            sampled: is_sampled,
+            is_input_attachment: false,
+        });
+        self.clear_values.push(clear_value.unwrap_or_default());
+
+        AttachmentIndex((self.attachments.len() - 1) as u32)
+    }
+
+    pub fn add_subpass(
+        &mut self,
+        attachments: &[AttachmentIndex],
+        depth_attachment: Option<AttachmentIndex>,
+        input_attachments: &[AttachmentIndex],
+    ) -> u32 {
+        self.subpasses.push(SubpassDescription {
+            attachments: attachments
+                .iter()
+                .map(|i| vk::AttachmentReference { attachment: i.0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL })
+                .collect(),
+            depth_attachment: depth_attachment.map(|i| vk::AttachmentReference {
+                attachment: i.0,
+                layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            }),
+            input_attachments: input_attachments
+                .iter()
+                .map(|i| vk::AttachmentReference { attachment: i.0, layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL })
+                .collect(),
+        });
+
+        for iatt in input_attachments {
+            self.attachments[iatt.0 as usize].is_input_attachment = true;
+        }
+
+        self.subpasses.len() as u32 - 1
+    }
+
+    pub fn build(self, core: &Arc<Core>, width: u32, height: u32) -> eyre::Result<()> {
+        let dependencies = self.create_subpass_dependencies();
+
+        let subpasses: Vec<_> = self.subpasses.iter().map(|s| s.get_description()).collect();
+        let attachments: Vec<_> = self.attachments.iter().map(|a| a.description).collect();
+
+        let render_pass = unsafe {
+            core.device().create_render_pass(
+                &vk::RenderPassCreateInfo::builder()
+                    .attachments(&attachments)
+                    .subpasses(&subpasses)
+                    .dependencies(&dependencies)
+                    .build(),
+                None,
+            )
+        }?;
+
+        let mut mrender_pass = MultiPassRenderPass {
+            core: core.clone(),
+            render_pass,
+            clear_values: self.clear_values,
+            attachments: self.attachments,
+            width,
+            height,
+            framebuffer: None,
+        };
+
+        mrender_pass.init()?;
+
+        todo!()
+    }
+}
+
+pub struct MultiPassRenderPass {
+    core: Arc<Core>,
+    render_pass: vk::RenderPass,
+    clear_values: Vec<vk::ClearValue>,
+    attachments: Vec<AttachmentInfo>,
+    width: u32,
+    height: u32,
+    framebuffer: Option<Framebuffer>,
+}
+
+struct Framebuffer {
+    framebuffer: vk::Framebuffer,
+    images: Box<[Image]>,
+    views: Box<[vk::ImageView]>,
+    core: Arc<Core>,
+}
+
+impl Drop for Framebuffer {
+    fn drop(&mut self) {
+        unsafe {
+            self.core.device().destroy_framebuffer(self.framebuffer, None);
+        }
+    }
+}
+
+impl MultiPassRenderPass {
+    fn init(&mut self) -> eyre::Result<()> {
+        self.create_framebuffers()?;
+        Ok(())
+    }
+
+    fn create_framebuffers(&mut self) -> eyre::Result<()> {
+        let images = self
+            .attachments
+            .iter()
+            .map(|att| {
+                let is_depth = is_depth_format(att.description.format);
+
+                let mut flags = if is_depth {
+                    vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                } else {
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT
+                };
+                if att.is_input_attachment {
+                    flags |= vk::ImageUsageFlags::INPUT_ATTACHMENT
+                }
+                if att.sampled {
+                    flags |= vk::ImageUsageFlags::SAMPLED;
+                }
+
+                let image = self.core.new_image(att.description.format, flags, self.width, self.height, 1)?;
+
+                Ok(image)
+            })
+            .collect::<Result<Box<[_]>>>()?;
+
+        let views: Box<[_]> = images.iter().map(|i| i.view()).collect();
+
+        let framebuffer = unsafe {
+            self.core.device().create_framebuffer(
+                &vk::FramebufferCreateInfo::builder()
+                    .attachments(&views)
+                    .render_pass(self.render_pass)
+                    .width(self.width)
+                    .height(self.height)
+                    .layers(1)
+                    .build(),
+                None,
+            )
+        }?;
+
+        self.framebuffer = Some(Framebuffer { framebuffer, images, views, core: self.core.clone() });
+
+        Ok(())
+    }
+}
+
+impl Renderpass for MultiPassRenderPass{
+    fn get_subpasses(&self) -> &[Subpass] {
+        todo!()
+    }
+
+    fn vk_renderpas(&self) -> vk::RenderPass {
+        self.render_pass
+    }
+
+    fn extends(&self) -> (u32, u32) {
+        (self.width,self.height)
+    }
+
+    fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+
+    fn framebuffer(&self) -> vk::Framebuffer {
+        self.framebuffer.as_ref().unwrap().framebuffer
+    }
+
+    fn clear_values(&self) -> &[vk::ClearValue] {
+        &self.clear_values
+    }
+}
+
+impl Drop for MultiPassRenderPass {
+    fn drop(&mut self) {
+        unsafe {
+            self.core.device().destroy_render_pass(self.render_pass, None);
+        }
+    }
+}
+
+impl RenderPassBuilder {
+    fn create_subpass_dependencies(&self) -> Vec<vk::SubpassDependency> {
+        let mut attachment_uses = Vec::new();
+        attachment_uses.resize(self.attachments.len(), None);
+
+        //create subpass dependencies
+        let mut dependencies = Vec::new();
+        for (i, subpass) in self.subpasses.iter().enumerate() {
+            for att in &subpass.attachments {
+                let att_use = &mut attachment_uses[att.attachment as usize];
+                if let Some(usage) = att_use {
+                    dependencies.push(vk::SubpassDependency {
+                        src_subpass: *usage,
+                        dst_subpass: i as u32,
+                        src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        dependency_flags: vk::DependencyFlags::BY_REGION,
+                    });
+                } else {
+                    *att_use = Some(i as u32);
+                }
+            }
+
+            if let Some(att) = &subpass.depth_attachment {
+                let att_use = &mut attachment_uses[att.attachment as usize];
+                if let Some(usage) = att_use {
+                    dependencies.push(vk::SubpassDependency {
+                        src_subpass: *usage,
+                        dst_subpass: i as u32,
+                        src_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                        dst_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                        src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        dst_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        dependency_flags: vk::DependencyFlags::BY_REGION,
+                    });
+                } else {
+                    *att_use = Some(i as u32);
+                }
+            }
+
+            for att in &subpass.input_attachments {
+                let att_use = &mut attachment_uses[att.attachment as usize];
+                let att_desc = &self.attachments[att.attachment as usize];
+                let is_depth = is_depth_format(att_desc.description.format);
+
+                if let Some(usage) = att_use {
+                    dependencies.push(vk::SubpassDependency {
+                        src_subpass: *usage,
+                        dst_subpass: i as u32,
+                        src_stage_mask: if is_depth {
+                            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+                        } else {
+                            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        },
+                        dst_stage_mask: vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        src_access_mask: if is_depth {
+                            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                        } else {
+                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        },
+                        dst_access_mask: vk::AccessFlags::INPUT_ATTACHMENT_READ,
+                        dependency_flags: vk::DependencyFlags::BY_REGION,
+                    });
+                } else {
+                    *att_use = Some(i as u32);
+                }
+            }
+        }
+
+        dependencies
+    }
+}

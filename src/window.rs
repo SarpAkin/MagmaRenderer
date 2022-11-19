@@ -5,8 +5,6 @@ use glfw::Context;
 
 use crate::core::*;
 
-// use glfw::*;
-
 pub const CPU_BUFFERING_NUM: usize = 2;
 
 struct BufferedResources {
@@ -25,7 +23,7 @@ pub struct Window {
     events: std::sync::mpsc::Receiver<(f64, glfw::WindowEvent)>,
     cursor: Cursor,
     last_time: SystemTime,
-    delta_time:f64,
+    delta_time: f64,
     key_states: HashMap<Key, InputState>,
     mbutton_states: HashMap<MouseButton, InputState>,
 }
@@ -57,7 +55,6 @@ impl Window {
         self.cursor.mouserely = self.cursor.mousey - self.cursor.oldmousey;
         self.cursor.oldmousex = self.cursor.mousex;
         self.cursor.oldmousey = self.cursor.mousey;
-
 
         self.current_framedata_mut().render_fence.try_wait(None)?;
 
@@ -122,7 +119,6 @@ impl Window {
         window.set_mouse_button_polling(true);
         window.set_cursor_pos_polling(true);
 
-
         // window.make_current();
 
         let (core, surface) = unsafe { Core::new(Some(&window)) };
@@ -167,7 +163,7 @@ impl Window {
 
         for (_, e) in glfw::flush_messages(&self.events) {
             // println!("{e:?}");
-            
+
             match e {
                 glfw::WindowEvent::CursorPos(x, y) => (self.cursor.mousex, self.cursor.mousey) = (x as f32, y as f32),
                 // glfw::WindowEvent::Size(_, _) => todo!(),
@@ -176,7 +172,9 @@ impl Window {
                 // glfw::WindowEvent::Focus(_) => todo!(),
                 // glfw::WindowEvent::Iconify(_) => todo!(),
                 // glfw::WindowEvent::FramebufferSize(_, _) => todo!(),
-                // glfw::WindowEvent::MouseButton(_, _, _) => todo!(),
+                glfw::WindowEvent::MouseButton(button, action, _m) => {
+                    self.mbutton_states.insert(button, InputState::from(action));
+                }
                 // glfw::WindowEvent::Pos(_, _) => todo!(),
                 // glfw::WindowEvent::CursorEnter(_) => todo!(),
                 // glfw::WindowEvent::Scroll(_, _) => todo!(),
@@ -212,7 +210,7 @@ pub type Key = glfw::Key;
 pub type MouseButton = glfw::MouseButton;
 // pub type InputState = glfw::Action;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputState {
     Released,
     Pressed,
@@ -237,7 +235,9 @@ impl Window {
     pub fn get_mouse_button(&self, button: MouseButton) -> InputState {
         self.mbutton_states.get(&button).and_then(|a| Some(*a)).unwrap_or(InputState::Released)
     }
-    pub fn delta_time(&self) -> f64 {self.delta_time}
+    pub fn delta_time(&self) -> f64 { self.delta_time }
+    pub fn lock_cursor(&mut self) { self.window.set_cursor_mode(glfw::CursorMode::Disabled); }
+    pub fn unlock_cursor(&mut self) { self.window.set_cursor_mode(glfw::CursorMode::Normal); }
 }
 
 impl Drop for Window {

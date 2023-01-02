@@ -1,7 +1,8 @@
+use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 
 use super::renderpass::Renderpass;
-use super::{core::Core, ref_or_arc::RefOrArc};
+use super::{core::Core};
 
 use ash::vk::{self, DescriptorSetLayout};
 use bytemuck::{Pod, Zeroable};
@@ -21,15 +22,11 @@ impl PipelineManager {
             }
         }
     }
-    pub fn new(_device: &ash::Device) -> Self {
-        Self {
-            pipeline_layouts: Mutex::new(vec![]),
-        }
-    }
+    pub fn new(_device: &ash::Device) -> Self { Self { pipeline_layouts: Mutex::new(vec![]) } }
 }
 
 impl Core {
-    fn create_pipeline_layout(&self, builder: PipelineLayoutBuilder) -> Result<vk::PipelineLayout, vk::Result> {
+    fn create_pipeline_layout(&self, builder: &PipelineLayoutBuilder) -> Result<vk::PipelineLayout, vk::Result> {
         let info = vk::PipelineLayoutCreateInfo::builder()
             .push_constant_ranges(&builder.push_constants)
             .set_layouts(&builder.descriptor_layouts)
@@ -51,16 +48,16 @@ pub struct PipelineLayoutBuilder {
 }
 
 impl PipelineLayoutBuilder {
-    pub fn new() -> Self {
-        Self {
-            push_constants: vec![],
-            descriptor_layouts: vec![],
-        }
+    pub fn new() -> Self { Self { push_constants: vec![], descriptor_layouts: vec![] } }
+
+    pub fn build(&self, core: &Core) -> Result<vk::PipelineLayout, vk::Result> { core.create_pipeline_layout(self) }
+
+    pub fn add_push_with_size(&mut self, stage: vk::ShaderStageFlags, offset: u32, size: u32) -> &mut PipelineLayoutBuilder {
+        self.push_constants.push(vk::PushConstantRange { offset, size, stage_flags: stage });
+        self
     }
 
-    pub fn build(self, core: &Core) -> Result<vk::PipelineLayout, vk::Result> { core.create_pipeline_layout(self) }
-
-    pub fn add_push<T>(mut self, stage: vk::ShaderStageFlags, offset: u32) -> PipelineLayoutBuilder {
+    pub fn add_push<T>(&mut self, stage: vk::ShaderStageFlags, offset: u32) -> &mut PipelineLayoutBuilder {
         self.push_constants.push(vk::PushConstantRange {
             offset,
             size: std::mem::size_of::<T>() as u32,
@@ -69,7 +66,7 @@ impl PipelineLayoutBuilder {
         self
     }
 
-    pub fn add_set(mut self, set: DescriptorSetLayout) -> PipelineLayoutBuilder {
+    pub fn add_set(&mut self, set: DescriptorSetLayout) -> &mut PipelineLayoutBuilder {
         self.descriptor_layouts.push(set);
         self
     }
@@ -91,10 +88,7 @@ impl ShaderModule {
                 },
                 None,
             )?;
-            Ok(ShaderModule {
-                module,
-                core: core.clone(),
-            })
+            Ok(ShaderModule { module, core: core.clone() })
         }
     }
 
@@ -118,6 +112,7 @@ pub struct GPipelineBuilder {
     rasterizer: vk::PipelineRasterizationStateCreateInfo,
     multisampling: vk::PipelineMultisampleStateCreateInfo,
     vertex_description: Option<VertexInputDescriptionBuilder>,
+    descriptor_set_layouts: Option<Box<[vk::DescriptorSetLayout]>>,
 }
 
 impl GPipelineBuilder {
@@ -154,23 +149,15 @@ impl GPipelineBuilder {
         self
     }
     pub fn set_rasterization(&mut self, polygon_mode: vk::PolygonMode, cull_mode: vk::CullModeFlags) -> &mut Self {
-        self.rasterizer = vk::PipelineRasterizationStateCreateInfo {
-            polygon_mode,
-            cull_mode,
-            line_width: 1.0,
-            ..Default::default()
-        };
+        self.rasterizer =
+            vk::PipelineRasterizationStateCreateInfo { polygon_mode, cull_mode, line_width: 1.0, ..Default::default() };
         self
     }
     pub fn set_depth_testing(&mut self, depth_testing: bool) -> &mut Self {
         self.depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
             depth_test_enable: depth_testing as u32,
             depth_write_enable: depth_testing as u32,
-            depth_compare_op: if depth_testing {
-                vk::CompareOp::LESS_OR_EQUAL
-            } else {
-                vk::CompareOp::ALWAYS
-            },
+            depth_compare_op: if depth_testing { vk::CompareOp::LESS_OR_EQUAL } else { vk::CompareOp::ALWAYS },
             ..Default::default()
         };
         self
@@ -181,22 +168,21 @@ impl GPipelineBuilder {
         self
     }
 
+    pub fn set_descriptor_set_layouts(&mut self, layouts: Box<[DescriptorSetLayout]>) {
+        self.descriptor_set_layouts = Some(layouts);
+    }
+
     pub fn build(
         &self,
         core: &Arc<Core>,
         renderpass: &dyn Renderpass,
         subpass_index: u32,
     ) -> Result<Arc<Pipeline>, vk::Result> {
-        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
-            .scissor_count(1)
-            .viewport_count(1)
-            .build();
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder().scissor_count(1).viewport_count(1).build();
 
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
 
-        let ds_info = vk::PipelineDynamicStateCreateInfo::builder()
-            .dynamic_states(&dynamic_states)
-            .build();
+        let ds_info = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states).build();
 
         let attachments = renderpass.get_subpasses()[subpass_index as usize]
             .get_attachments()
@@ -214,9 +200,11 @@ impl GPipelineBuilder {
             .logic_op(vk::LogicOp::COPY)
             .build();
 
+        let empty_vinfo = VertexInputDescriptionBuilder::new();
+
         let create_info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&self.shader_stages)
-            .vertex_input_state(&self.vertex_description.as_ref().unwrap().info())
+            .vertex_input_state(&self.vertex_description.as_ref().unwrap_or(&empty_vinfo).info())
             .input_assembly_state(&self.input_assembly)
             .multisample_state(&self.multisampling)
             .depth_stencil_state(&self.depth_stencil)
@@ -229,10 +217,8 @@ impl GPipelineBuilder {
             .color_blend_state(&color_blend)
             .build();
 
-        let pipeline = match unsafe {
-            core.device()
-                .create_graphics_pipelines(core.pipeline_cache(), &[create_info], None)
-        } {
+        let pipeline = match unsafe { core.device().create_graphics_pipelines(core.pipeline_cache(), &[create_info], None) }
+        {
             Ok(p) => p[0],
             Err((_, e)) => return Err(e),
         };
@@ -242,6 +228,7 @@ impl GPipelineBuilder {
             pipeline,
             layout: self.pipeline_layout,
             ptype: vk::PipelineBindPoint::GRAPHICS,
+            descriptor_set_layouts: self.descriptor_set_layouts.clone(),
         }))
     }
 }
@@ -251,9 +238,53 @@ pub struct Pipeline {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     pub ptype: vk::PipelineBindPoint,
+    descriptor_set_layouts: Option<Box<[vk::DescriptorSetLayout]>>,
+}
+
+impl Core {
+    pub fn create_compute(
+        self: &Arc<Core>,
+        pipeline_layout: vk::PipelineLayout,
+        shader_module: &ShaderModule,
+        descriiptor_set_layouts: Box<[vk::DescriptorSetLayout]>,
+    ) -> eyre::Result<Arc<Pipeline>, vk::Result> {
+        Pipeline::new_compute(self, pipeline_layout, shader_module, descriiptor_set_layouts)
+    }
 }
 
 impl Pipeline {
+    pub fn new_compute(
+        core: &Arc<Core>,
+        pipeline_layout: vk::PipelineLayout,
+        shader_module: &ShaderModule,
+        descriiptor_set_layouts: Box<[vk::DescriptorSetLayout]>,
+    ) -> eyre::Result<Arc<Pipeline>, vk::Result> {
+        let pipeline = match unsafe {
+            let shader_stage = vk::PipelineShaderStageCreateInfo::builder()
+                .module(shader_module.module())
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .name(CStr::from_bytes_with_nul_unchecked(b"main\0"))
+                .build();
+
+            core.device().create_compute_pipelines(
+                core.pipeline_cache(),
+                &[vk::ComputePipelineCreateInfo::builder().stage(shader_stage).layout(pipeline_layout).build()],
+                None,
+            )
+        } {
+            Ok(pipelines) => pipelines[0],
+            Err((_, e)) => return Err(e),
+        };
+
+        Ok(Arc::new(Pipeline {
+            core: core.clone(),
+            pipeline,
+            layout: pipeline_layout,
+            ptype: vk::PipelineBindPoint::COMPUTE,
+            descriptor_set_layouts: Some(descriiptor_set_layouts),
+        }))
+    }
+
     pub fn bind(self: &Arc<Self>, cmd: vk::CommandBuffer) {
         let device = self.core.device();
         unsafe {
@@ -271,6 +302,10 @@ impl Pipeline {
         }
     }
 
+    pub fn get_descriptor_set_layout(&self, index: u32) -> Option<DescriptorSetLayout> {
+        self.descriptor_set_layouts.as_ref().and_then(|sls| sls.get(index as usize).map(|l| l.clone()))
+    }
+
     // pub fn bind_descriptor(&self,cmd:vk::CommandBuffer){
 
     // }
@@ -284,7 +319,7 @@ impl Drop for Pipeline {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VertexInputDescriptionBuilder {
     bindings: Vec<vk::VertexInputBindingDescription>,
     attribures: Vec<vk::VertexInputAttributeDescription>,
@@ -302,12 +337,7 @@ impl VertexInputDescriptionBuilder {
             .build()
     }
 
-    pub fn new() -> Self {
-        Self {
-            bindings: vec![],
-            attribures: vec![],
-        }
-    }
+    pub fn new() -> Self { Self { bindings: vec![], attribures: vec![] } }
 
     pub fn push_binding<T>(&mut self, input_rate: vk::VertexInputRate)
     where

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{cast_to_static_lifetime, core::*, renderpass, Pipeline};
+use super::{cast_to_static_lifetime, core::*,buffer::*, renderpass, Pipeline};
 
 use ash::vk;
 use bytemuck::Pod;
@@ -54,6 +54,7 @@ impl CommandPool {
             dependencies: vec![],
             bound_pipeline: None,
             device: unsafe { cast_to_static_lifetime(self.core.device()) },
+            bound_descriptor_sets: [vk::DescriptorSet::null();4],
         }
     }
 
@@ -64,6 +65,7 @@ impl CommandPool {
             dependencies: vec![],
             bound_pipeline: None,
             device: unsafe { cast_to_static_lifetime(self.core.device()) },
+            bound_descriptor_sets: [vk::DescriptorSet::null();4],
         }
     }
 }
@@ -82,6 +84,7 @@ pub struct CommandBuffer {
     pool: Arc<CommandPool>,
     cmd: vk::CommandBuffer,
     dependencies: Vec<Arc<dyn Drop>>,
+    bound_descriptor_sets: [vk::DescriptorSet; 4],
     bound_pipeline: Option<Arc<Pipeline>>,
     device: &'static ash::Device,
 }
@@ -162,6 +165,9 @@ impl CommandBuffer {
     }
 
     pub fn exectue_secondries(&mut self, cmds: Vec<CommandBuffer>) {
+        if cmds.len() == 0 {
+            return;
+        }
         let inner_cmds: SmallVec<[_; 16]> = cmds.iter().map(|c| c.inner()).collect();
         unsafe { self.device().cmd_execute_commands(self.inner(), &inner_cmds) };
 
@@ -191,6 +197,13 @@ impl CommandBuffer {
     }
 
     pub fn bind_pipeline(&mut self, pipeline: &Arc<Pipeline>) {
+        if let Some(bound_pipeline) = &self.bound_pipeline {
+            if bound_pipeline.pipeline == pipeline.pipeline {
+                //do nothing if pipeline is already bound
+                return;
+            }
+        }
+
         pipeline.bind(self.inner());
         self.bound_pipeline.take().and_then(|p| Some(self.dependencies.push(p as Arc<dyn Drop>)));
 
@@ -198,6 +211,14 @@ impl CommandBuffer {
     }
 
     pub fn bind_descriptor_set(&mut self, index: u32, dset: vk::DescriptorSet) {
+        if let Some(bound_set) = self.bound_descriptor_sets.get_mut(index as usize) {
+            if *bound_set == dset {
+                return;
+            } else {
+                *bound_set = dset;
+            }
+        }
+
         unsafe {
             self.device.cmd_bind_descriptor_sets(
                 self.inner(),
@@ -276,5 +297,139 @@ impl CommandBuffer {
         fence.try_wait(None)?;
 
         Ok(())
+    }
+}
+
+//draw commands and & dispatch
+impl CommandBuffer {
+    pub unsafe fn draw(&mut self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
+        self.device().cmd_draw(self.inner(), vertex_count, instance_count, first_vertex, first_instance);
+    }
+
+    pub unsafe fn draw_indexed(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) {
+        self.device().cmd_draw_indexed(self.inner(), index_count, instance_count, first_index, vertex_offset, first_instance)
+    }
+
+    pub unsafe fn draw_indexed_indirect_count(
+        &mut self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        count_buffer: vk::Buffer,
+        count_buffer_offset: vk::DeviceSize,
+        max_draw_count: u32,
+        stride: u32,
+    ) {
+        self.device().cmd_draw_indexed_indirect_count(
+            self.inner(),
+            buffer,
+            offset,
+            count_buffer,
+            count_buffer_offset,
+            max_draw_count,
+            stride,
+        )
+    }
+
+    pub unsafe fn draw_indirect_count(
+        &mut self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        count_buffer: vk::Buffer,
+        count_buffer_offset: vk::DeviceSize,
+        max_draw_count: u32,
+        stride: u32,
+    ) {
+        self.device().cmd_draw_indirect_count(
+            self.inner(),
+            buffer,
+            offset,
+            count_buffer,
+            count_buffer_offset,
+            max_draw_count,
+            stride,
+        )
+    }
+
+    pub unsafe fn draw_indexed_indirect(
+        &mut self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        draw_count: u32,
+        stride: u32,
+    ) {
+        self.device().cmd_draw_indexed_indirect(self.inner(), buffer, offset, draw_count, stride)
+    }
+
+    pub unsafe fn draw_indirect(&mut self, buffer: vk::Buffer, offset: vk::DeviceSize, draw_count: u32, stride: u32) {
+        self.device().cmd_draw_indirect(self.inner(), buffer, offset, draw_count, stride)
+    }
+
+    pub unsafe fn dispatch(&mut self, group_count_x: u32, group_count_y: u32, group_count_z: u32) {
+        self.device().cmd_dispatch(self.inner(), group_count_x, group_count_y, group_count_z)
+    }
+
+    /// <https://www.khronos.org/registry/vulkan/specs/1.3-extensions/man/html/vkCmdDispatchIndirect.html>
+    pub unsafe fn dispatch_indirect(&mut self, buffer: vk::Buffer, offset: vk::DeviceSize) {
+        self.device().cmd_dispatch_indirect(self.inner(), buffer, offset)
+    }
+
+    pub unsafe fn dispatch_base(
+        &mut self,
+        base_group_x: u32,
+        base_group_y: u32,
+        base_group_z: u32,
+        group_count_x: u32,
+        group_count_y: u32,
+        group_count_z: u32,
+    ) {
+        self.device().cmd_dispatch_base(
+            self.inner(),
+            base_group_x,
+            base_group_y,
+            base_group_z,
+            group_count_x,
+            group_count_y,
+            group_count_z,
+        )
+    }
+
+    pub unsafe fn copy_buffer_reigons(
+        &mut self,
+        src_buffer: vk::Buffer,
+        dst_buffer: vk::Buffer,
+        regions: &[vk::BufferCopy],
+    ) {
+        if regions.len() == 0 {
+            return;
+        }
+
+        self.device().cmd_copy_buffer(self.inner(), src_buffer, dst_buffer, regions);
+    }
+
+    pub unsafe fn pipeline_barrier(
+        &mut self,
+        src_stage_mask: vk::PipelineStageFlags,
+        dst_stage_mask: vk::PipelineStageFlags,
+        dependency_flags: vk::DependencyFlags,
+        memory_barriers: &[vk::MemoryBarrier],
+        buffer_memory_barriers: &[vk::BufferMemoryBarrier],
+        image_memory_barriers: &[vk::ImageMemoryBarrier],
+    ) {
+        self.device().cmd_pipeline_barrier(
+            self.inner(),
+            src_stage_mask,
+            dst_stage_mask,
+            dependency_flags,
+            memory_barriers,
+            buffer_memory_barriers,
+            image_memory_barriers,
+        )
     }
 }

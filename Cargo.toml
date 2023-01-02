@@ -20,5 +20,14 @@ glfw = { version = "0.47.0", default-features = false }
 backtrace = "0.3.66"
 png = "0.17.7"
 
+# material system
+serde = { version = "^1.0", features = ["derive"] }
+serde_yaml = "^0.9"
+shaderc = "^0.7.4"
+spirv-reflect = "^0.2.3"
+
 [env]
 RUSTFLAGS = "-A dead_code"
+
+[profile.dev]
+build-override.debug = 2

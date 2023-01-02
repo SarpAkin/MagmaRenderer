@@ -41,6 +41,7 @@ impl DescriptorSetLayoutBuilder {
                 .descriptor_type(dtype)
                 .descriptor_count(count)
                 .stage_flags(stage)
+                .binding(self.bindings.len() as u32)
                 .build(),
         );
         self
@@ -134,6 +135,10 @@ impl DescriptorSetBuilder {
         self.add_buffers(vk::DescriptorType::UNIFORM_BUFFER, buffers)
     }
 
+    pub fn add_ssbo(&mut self, buffers: &[&dyn RawBufferSlice]) -> &mut DescriptorSetBuilder {
+        self.add_buffers(vk::DescriptorType::STORAGE_BUFFER, buffers)
+    }
+
     pub fn add_image(
         &mut self,
         view: vk::ImageView,
@@ -150,8 +155,27 @@ impl DescriptorSetBuilder {
         self
     }
 
+    pub fn add_sampled_images(&mut self, images: &[(&Image, vk::Sampler)]) -> &mut DescriptorSetBuilder {
+        self.image_bindings.push(ImageBinding {
+            image_infos: images.iter().map(|(image, sampler)| vk::DescriptorImageInfo {
+                sampler: *sampler,
+                image_view: image.view(),
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            }).collect(),
+            binding: self.binding_counter,
+            dtype: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        });
+        self.binding_counter += 1;
+        self
+    }
+
     pub fn add_sampled_image(&mut self, image: &Image, sampler: vk::Sampler) -> &mut DescriptorSetBuilder {
-        self.add_image(image.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, sampler, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        self.add_image(
+            image.view(),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            sampler,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )
     }
 
     pub fn build(

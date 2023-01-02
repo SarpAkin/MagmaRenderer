@@ -39,6 +39,8 @@ pub struct Cursor {
 }
 
 impl Window {
+    pub fn frame_index(&self) -> usize { self.buffer_index as usize }
+
     pub fn prepare_and_poll_events(&mut self) -> eyre::Result<bool> {
         if self.window.should_close() {
             self.wait_for_fences();
@@ -46,7 +48,10 @@ impl Window {
         }
 
         let now = SystemTime::now();
-        self.delta_time = now.duration_since(self.last_time).unwrap().as_secs_f64();
+        self.delta_time = now.duration_since(self.last_time).map(|d| d.as_secs_f64()).unwrap_or_else(|err| {
+            eprintln!("error when getting delta time: {err}");
+            0.1//return a non zero value
+        });
         self.last_time = now;
 
         self.poll_events();

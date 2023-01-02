@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cell::{Cell, RefCell},
     error,
     ptr::null,
@@ -27,13 +28,16 @@ impl Subpass {
     pub fn get_attachments(&self) -> &[vk::Format] { &self.attachment_formats }
 }
 
-pub trait Renderpass {
+pub trait Renderpass: Any {
     fn get_subpasses(&self) -> &[Subpass];
     fn vk_renderpas(&self) -> vk::RenderPass;
     fn extends(&self) -> (u32, u32);
     fn core(&self) -> &Arc<Core>;
     fn framebuffer(&self) -> vk::Framebuffer;
     fn clear_values(&self) -> &[vk::ClearValue];
+    fn get_attachment<'a>(&'a self, index: AttachmentIndex) -> &'a Image;
+    fn resize(&mut self, width: u32, height: u32) -> eyre::Result<()>;
+
     fn set_scissor_and_viewport(&self, cmd: vk::CommandBuffer) {
         let device = self.core().device();
 
@@ -79,6 +83,17 @@ pub trait Renderpass {
 
         if inline {
             self.set_scissor_and_viewport(cmd);
+        }
+    }
+
+    fn next(&self, cmd: vk::CommandBuffer, inline: bool) {
+        let device = self.core().device();
+
+        unsafe {
+            device.cmd_next_subpass(
+                cmd,
+                inline.then_some(vk::SubpassContents::INLINE).unwrap_or(vk::SubpassContents::SECONDARY_COMMAND_BUFFERS),
+            );
         }
     }
 
@@ -249,7 +264,26 @@ impl Renderpass for SurfaceRenderpass {
 
     fn get_subpasses(&self) -> &[Subpass] { &self.subpasses }
 
-    // fn begin(&self, cmd: vk::CommandBuffer) { SurfaceRenderpass::begin(&self, cmd); }
+    fn get_attachment(&self, index: AttachmentIndex) -> &Image { todo!() }
+
+    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        self.surface.recrate_swapchain();
+        self.surface.width = width;
+        self.surface.height = height;
+
+        self.depth_image = self.core.new_image(
+            vk::Format::D16_UNORM,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            self.surface.width,
+            self.surface.height,
+            1,
+        )?;
+
+        self.destroy_framebuffers();
+        self.create_framebuffers()?;
+
+        Ok(())
+    }
 }
 
 impl SurfaceRenderpass {
@@ -283,25 +317,6 @@ impl SurfaceRenderpass {
                     .build(),
             )
         }?;
-
-        Ok(())
-    }
-
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        self.surface.recrate_swapchain();
-        self.surface.width = width;
-        self.surface.height = height;
-
-        self.depth_image = self.core.new_image(
-            vk::Format::D16_UNORM,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            self.surface.width,
-            self.surface.height,
-            1,
-        )?;
-
-        self.destroy_framebuffers();
-        self.create_framebuffers()?;
 
         Ok(())
     }
@@ -411,7 +426,7 @@ impl RenderPassBuilder {
         self.subpasses.len() as u32 - 1
     }
 
-    pub fn build(self, core: &Arc<Core>, width: u32, height: u32) -> eyre::Result<()> {
+    pub fn build(self, core: &Arc<Core>, width: u32, height: u32) -> eyre::Result<MultiPassRenderPass> {
         let dependencies = self.create_subpass_dependencies();
 
         let subpasses: Vec<_> = self.subpasses.iter().map(|s| s.get_description()).collect();
@@ -432,15 +447,26 @@ impl RenderPassBuilder {
             core: core.clone(),
             render_pass,
             clear_values: self.clear_values,
-            attachments: self.attachments,
             width,
             height,
             framebuffer: None,
+            subpasses: self
+                .subpasses
+                .iter()
+                .map(|s| Subpass {
+                    attachment_formats: s
+                        .attachments
+                        .iter()
+                        .map(|ar| self.attachments[ar.attachment as usize].description.format)
+                        .collect(),
+                })
+                .collect(),
+            attachments: self.attachments,
         };
 
         mrender_pass.init()?;
 
-        todo!()
+        Ok(mrender_pass)
     }
 }
 
@@ -452,6 +478,7 @@ pub struct MultiPassRenderPass {
     width: u32,
     height: u32,
     framebuffer: Option<Framebuffer>,
+    subpasses: Box<[Subpass]>,
 }
 
 struct Framebuffer {
@@ -521,29 +548,30 @@ impl MultiPassRenderPass {
     }
 }
 
-impl Renderpass for MultiPassRenderPass{
-    fn get_subpasses(&self) -> &[Subpass] {
-        todo!()
+impl Renderpass for MultiPassRenderPass {
+    fn get_subpasses(&self) -> &[Subpass] { &self.subpasses }
+
+    fn vk_renderpas(&self) -> vk::RenderPass { self.render_pass }
+
+    
+    fn extends(&self) -> (u32, u32) { (self.width, self.height) }
+
+    fn core(&self) -> &Arc<Core> { &self.core }
+
+    fn framebuffer(&self) -> vk::Framebuffer { self.framebuffer.as_ref().unwrap().framebuffer }
+
+    fn clear_values(&self) -> &[vk::ClearValue] { &self.clear_values }
+
+    fn get_attachment(&self, index: AttachmentIndex) -> &Image {
+        &self.framebuffer.as_ref().unwrap().images[index.0 as usize]
     }
 
-    fn vk_renderpas(&self) -> vk::RenderPass {
-        self.render_pass
-    }
+    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        self.width = width;
+        self.height = height;
+        self.create_framebuffers()?;
 
-    fn extends(&self) -> (u32, u32) {
-        (self.width,self.height)
-    }
-
-    fn core(&self) -> &Arc<Core> {
-        &self.core
-    }
-
-    fn framebuffer(&self) -> vk::Framebuffer {
-        self.framebuffer.as_ref().unwrap().framebuffer
-    }
-
-    fn clear_values(&self) -> &[vk::ClearValue] {
-        &self.clear_values
+        Ok(())
     }
 }
 

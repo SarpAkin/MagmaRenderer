@@ -52,6 +52,7 @@ pub struct MaterialManager {
     default_sampler: Sampler,
     pool: DescriptorPool,
     mat_id_counter: u32,
+    render_targets: HashMap<String, RenderTargetInfo>,
 }
 
 struct CompiledShader {
@@ -132,6 +133,10 @@ impl PipelineReflection {
 }
 
 impl MaterialManager {
+    pub fn set_subpass(&mut self, subpass_name: String, subpass: &Subpass) {
+        self.render_targets.insert(subpass_name, subpass.get_render_target().clone());
+    }
+
     pub fn get_material(&self, id: MaterialID) -> Option<Material> {
         self.materials.get(&id).map(|m| Material { data: m, manager: self })
     }
@@ -140,12 +145,12 @@ impl MaterialManager {
         &mut self,
         cmd: &mut CommandBuffer,
         path: String,
-        renderpass: &dyn Renderpass,
-        subpass_index: u32,
+        // renderpass: &dyn Renderpass,
+        // subpass_index: u32,
     ) -> Result<MaterialID> {
         let mat_desc: MaterialDescripton = serde_yaml::from_str(&std::fs::read_to_string(&path)?)?;
 
-        let pipeline = self.load_pipeline(&mat_desc, renderpass, subpass_index)?;
+        let pipeline = self.load_pipeline(&mat_desc)?;
 
         let textures: Box<[_]> =
             mat_desc.textures.iter().map(|tfile| self.load_texture(cmd, tfile.clone())).collect::<Result<_>>()?;
@@ -206,6 +211,7 @@ impl MaterialManager {
             default_sampler: core.create_sampler(vk::Filter::NEAREST, None),
             pool: DescriptorPool::new(core),
             mat_id_counter: 1, //0 is reserved for null
+            render_targets: HashMap::new(),
         })
     }
 
@@ -256,8 +262,6 @@ impl MaterialManager {
     fn load_pipeline(
         &mut self,
         mat_desc: &MaterialDescripton,
-        renderpass: &dyn Renderpass,
-        subpass_index: u32,
     ) -> Result<PipelineDetails> {
         let compiled_shaders = mat_desc.shaders.iter().map(|s| Self::compile_shader(s)).collect::<Result<Vec<_>>>()?;
         let reflection_data = Self::reflect_shaders(&compiled_shaders)?;
@@ -277,7 +281,7 @@ impl MaterialManager {
         pipeline_builder.set_rasterization(vk::PolygonMode::FILL, vk::CullModeFlags::BACK);
         pipeline_builder.set_topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         pipeline_builder.set_descriptor_set_layouts(dset_layouts.into_boxed_slice());
-        pipeline_builder.set_render_target(renderpass.get_subpasses()[subpass_index as usize].get_render_target());
+        pipeline_builder.set_render_target(&self.render_targets[&mat_desc.subpass]);
         if let Some(vertex_description) = self.vertex_descriptions.get(&mat_desc.vertex) {
             pipeline_builder.set_vertex_description(vertex_description.clone());
         }
@@ -347,6 +351,7 @@ pub struct MaterialDescripton {
     shaders: Vec<String>,
     vertex: String,
     material_set: Option<u32>,
+    subpass:String,
 }
 
 // mod test {

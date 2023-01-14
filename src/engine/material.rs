@@ -1,5 +1,8 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
+use std::hash::Hash;
+use std::hash::Hasher;
 
 use bytemuck::cast_slice;
 use serde::Deserialize;
@@ -44,6 +47,11 @@ impl CommandBuffer {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PipelineArguments {
+    shaders: Vec<String>,
+}
+
 pub struct MaterialManager {
     core: Arc<Core>,
     materials: HashMap<MaterialID, MaterialData>,
@@ -53,6 +61,8 @@ pub struct MaterialManager {
     pool: DescriptorPool,
     mat_id_counter: u32,
     render_targets: HashMap<String, RenderTargetInfo>,
+    shader_compiler: ShaderCompiler,
+    cached_pipelines: HashMap<PipelineArguments, Arc<PipelineDetails>>,
 }
 
 struct CompiledShader {
@@ -66,7 +76,8 @@ struct BindingReflection {
     binding: u32,
     count: u32,
     stages: vk::ShaderStageFlags,
-    data: spirv_reflect::types::ReflectDescriptorBinding,
+    descriptor_type: spirv_reflect::types::ReflectDescriptorType,
+    // data: spirv_reflect::types::ReflectDescriptorBinding,
 }
 
 struct SetReflection {
@@ -93,7 +104,7 @@ impl SetReflection {
         let mut builder = DescriptorSetLayoutBuilder::new();
         for binding in &self.bindings {
             use spirv_reflect::types::ReflectDescriptorType;
-            match binding.data.descriptor_type {
+            match binding.descriptor_type {
                 ReflectDescriptorType::CombinedImageSampler
                 | ReflectDescriptorType::Sampler
                 | ReflectDescriptorType::SampledImage => builder.add_sampler(binding.stages, binding.count),
@@ -172,7 +183,7 @@ impl MaterialManager {
 
         let material = MaterialData {
             textures,
-            pipeline: pipeline.pipeline,
+            pipeline: pipeline.pipeline.clone(),
             buffers: Box::new([]),
             id: material_id,
             material_set,
@@ -189,7 +200,7 @@ impl MaterialManager {
     }
 
     pub fn compile_compute_shader(&mut self, filename: &str) -> Result<(Arc<Pipeline>, PipelineReflection)> {
-        let spirv = [Self::compile_shader(filename)?];
+        let spirv = [self.shader_compiler.compile_shader(filename)?];
         let reflection = Self::reflect_shaders(&spirv)?;
         let (playout, descriptro_layouts) = reflection.create_pipeline_layout(&self.core)?;
 
@@ -212,6 +223,8 @@ impl MaterialManager {
             pool: DescriptorPool::new(core),
             mat_id_counter: 1, //0 is reserved for null
             render_targets: HashMap::new(),
+            shader_compiler: ShaderCompiler::new(),
+            cached_pipelines: HashMap::new(),
         })
     }
 
@@ -224,46 +237,19 @@ impl MaterialManager {
         Ok(texture.clone())
     }
 
-    fn get_shader_type(filename: &str) -> Option<vk::ShaderStageFlags> {
-        let Some(a) = filename.rsplit('.').next() else {return None};
-        let shader_type = match a {
-            "vert" | "vs" => vk::ShaderStageFlags::VERTEX,
-            "frag" | "fs" => vk::ShaderStageFlags::FRAGMENT,
-            "comp" => vk::ShaderStageFlags::COMPUTE,
-            _ => return None,
-        };
+    fn load_pipeline(&mut self, mat_desc: &MaterialDescripton) -> Result<Arc<PipelineDetails>> {
+        let arguments = PipelineArguments { shaders: mat_desc.shaders.clone() };
 
-        Some(shader_type)
-    }
+        if let Some(details) = self.cached_pipelines.get(&arguments) {
+            return Ok(details.clone());
+        }
 
-    fn compile_shader(filename: &str) -> Result<CompiledShader> {
-        use shaderc::*;
+        let compiled_shaders = mat_desc
+            .shaders //
+            .iter()
+            .map(|s| self.shader_compiler.compile_shader(s))
+            .collect::<Result<Vec<_>>>()?;
 
-        let mut compiler = shaderc::Compiler::new().unwrap();
-        let options = shaderc::CompileOptions::new().unwrap();
-
-        let source = std::fs::read_to_string(filename)?;
-        let shader_type = Self::get_shader_type(filename).unwrap();
-        let compile_shader_type = match shader_type {
-            vk::ShaderStageFlags::VERTEX => ShaderKind::Vertex,
-            vk::ShaderStageFlags::FRAGMENT => ShaderKind::Fragment,
-            vk::ShaderStageFlags::COMPUTE => ShaderKind::Compute,
-            _ => panic!("unknown shader type"),
-        };
-
-        let bin = compiler.compile_into_spirv(&source, compile_shader_type, filename, "main", Some(&options))?;
-
-        let mut spirv_code = Vec::new();
-        bin.as_binary().clone_into(&mut spirv_code);
-
-        Ok(CompiledShader { spirv: spirv_code, stype: shader_type, source: Some(source) })
-    }
-
-    fn load_pipeline(
-        &mut self,
-        mat_desc: &MaterialDescripton,
-    ) -> Result<PipelineDetails> {
-        let compiled_shaders = mat_desc.shaders.iter().map(|s| Self::compile_shader(s)).collect::<Result<Vec<_>>>()?;
         let reflection_data = Self::reflect_shaders(&compiled_shaders)?;
 
         let (layout, dset_layouts) = reflection_data.create_pipeline_layout(&self.core)?;
@@ -288,10 +274,12 @@ impl MaterialManager {
 
         let pipeline = pipeline_builder.build(&self.core)?;
 
-        Ok(PipelineDetails { pipeline, reflection_data })
+        let details = Arc::new(PipelineDetails { pipeline, reflection_data });
+
+        Ok(details)
     }
 
-    fn reflect_shaders(compiled_shaders: &[CompiledShader]) -> Result<PipelineReflection> {
+    fn reflect_shaders(compiled_shaders: &[Arc<CompiledShader>]) -> Result<PipelineReflection> {
         use spirv_reflect::*;
 
         let mut sets = Vec::new();
@@ -311,7 +299,8 @@ impl MaterialManager {
                         binding: binding.binding,
                         count: binding.count,
                         stages: shader.stype,
-                        data: binding,
+                        descriptor_type: binding.descriptor_type,
+                        // data: binding,
                     })
                     .stages |= shader.stype;
             }
@@ -351,32 +340,75 @@ pub struct MaterialDescripton {
     shaders: Vec<String>,
     vertex: String,
     material_set: Option<u32>,
-    subpass:String,
+    subpass: String,
 }
 
-// mod test {
-//     use super::*;
-//     #[derive(Serialize, Deserialize)]
-//     struct AA {
-//         materials: Vec<MaterialDescripton>,
-//     }
+fn get_shader_type(filename: &str) -> Option<vk::ShaderStageFlags> {
+    let Some(a) = filename.rsplit('.').next() else {return None};
+    let shader_type = match a {
+        "vert" | "vs" => vk::ShaderStageFlags::VERTEX,
+        "frag" | "fs" => vk::ShaderStageFlags::FRAGMENT,
+        "comp" => vk::ShaderStageFlags::COMPUTE,
+        _ => return None,
+    };
 
-//     pub fn test_serialization() -> Result<()> {
-//         let a = AA {
-//             materials: (0..3)
-//                 .map(|i| MaterialDescripton {
-//                     textures: vec![format!("{i}.png"), String::from("gg.png")],
-//                     shaders: vec![String::from("ex.vert"), String::from("tri.frag")],
-//                     vertex: String::new(),
+    Some(shader_type)
+}
 
-//                 })
-//                 .collect(),
-//         };
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ShaderArguments {
+    filename: String,
+    glsl_hash: u64,
+}
 
-//         let file = std::fs::File::create("a.yaml")?;
+pub struct ShaderCompiler {
+    cached_shaders: HashMap<ShaderArguments, Arc<CompiledShader>>,
+}
 
-//         serde_yaml::to_writer(file, &a)?;
+impl ShaderCompiler {
+    fn compile_shader_uncached(filename: &str, source: String) -> Result<CompiledShader> {
+        use shaderc::*;
 
-//         Ok(())
-//     }
-// }
+        let mut compiler = shaderc::Compiler::new().unwrap();
+        let options = shaderc::CompileOptions::new().unwrap();
+
+        // let source = std::fs::read_to_string(filename)?;
+        let shader_type = get_shader_type(filename).unwrap();
+        let compile_shader_type = match shader_type {
+            vk::ShaderStageFlags::VERTEX => ShaderKind::Vertex,
+            vk::ShaderStageFlags::FRAGMENT => ShaderKind::Fragment,
+            vk::ShaderStageFlags::COMPUTE => ShaderKind::Compute,
+            _ => panic!("unknown shader type"),
+        };
+
+        let bin = compiler.compile_into_spirv(&source, compile_shader_type, filename, "main", Some(&options))?;
+
+        let mut spirv_code = Vec::new();
+        bin.as_binary().clone_into(&mut spirv_code);
+
+        let shader = CompiledShader { spirv: spirv_code, stype: shader_type, source: Some(source) };
+
+        Ok(shader)
+    }
+
+    fn compile_shader(&mut self, filename: &str) -> Result<Arc<CompiledShader>> {
+        let source = std::fs::read_to_string(filename)?;
+
+        let argument = ShaderArguments {
+            filename: filename.to_string(),
+            glsl_hash: {
+                let mut hasher = DefaultHasher::new();
+                source.hash(&mut hasher);
+                hasher.finish()
+            },
+        };
+
+        Ok(self
+            .cached_shaders
+            .entry(argument)
+            .or_insert_with(|| Arc::new(Self::compile_shader_uncached(filename, source).unwrap()))
+            .clone())
+    }
+
+    fn new() -> Self { Self { cached_shaders: HashMap::new() } }
+}

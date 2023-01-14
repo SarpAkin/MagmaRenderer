@@ -1,8 +1,8 @@
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 
-use super::renderpass::Renderpass;
-use super::{core::Core};
+use super::core::Core;
+use super::renderpass::{RenderTargetInfo, Renderpass};
 
 use ash::vk::{self, DescriptorSetLayout};
 use bytemuck::{Pod, Zeroable};
@@ -104,7 +104,7 @@ impl Drop for ShaderModule {
 }
 
 #[derive(Default)]
-pub struct GPipelineBuilder {
+pub struct GPipelineBuilder<'a> {
     shader_stages: Vec<vk::PipelineShaderStageCreateInfo>,
     pipeline_layout: vk::PipelineLayout,
     depth_stencil: vk::PipelineDepthStencilStateCreateInfo,
@@ -113,9 +113,10 @@ pub struct GPipelineBuilder {
     multisampling: vk::PipelineMultisampleStateCreateInfo,
     vertex_description: Option<VertexInputDescriptionBuilder>,
     descriptor_set_layouts: Option<Box<[vk::DescriptorSetLayout]>>,
+    render_target: Option<&'a RenderTargetInfo>,
 }
 
-impl GPipelineBuilder {
+impl<'a> GPipelineBuilder<'a> {
     pub fn new() -> Self {
         Self {
             multisampling: vk::PipelineMultisampleStateCreateInfo {
@@ -132,7 +133,7 @@ impl GPipelineBuilder {
         self
     }
 
-    pub fn add_shader_stage<'a>(&'a mut self, stage: vk::ShaderStageFlags, module: &'a vk::ShaderModule) -> &'a mut Self {
+    pub fn add_shader_stage(&mut self, stage: vk::ShaderStageFlags, module: &vk::ShaderModule) -> &mut Self {
         self.shader_stages.push(vk::PipelineShaderStageCreateInfo {
             stage,
             module: *module,
@@ -142,6 +143,11 @@ impl GPipelineBuilder {
         });
         self
         // self.marker.push(module);
+    }
+
+    pub fn set_render_target(&mut self, render_target: &'a RenderTargetInfo) -> &mut Self {
+        self.render_target = Some(render_target);
+        self
     }
 
     pub fn set_topology(&mut self, topology: vk::PrimitiveTopology) -> &mut Self {
@@ -163,7 +169,7 @@ impl GPipelineBuilder {
         self
     }
 
-    pub fn set_vertex_description(&mut self, desc: VertexInputDescriptionBuilder) -> &mut GPipelineBuilder {
+    pub fn set_vertex_description(&mut self, desc: VertexInputDescriptionBuilder) -> &mut Self {
         self.vertex_description = Some(desc);
         self
     }
@@ -172,20 +178,17 @@ impl GPipelineBuilder {
         self.descriptor_set_layouts = Some(layouts);
     }
 
-    pub fn build(
-        &self,
-        core: &Arc<Core>,
-        renderpass: &dyn Renderpass,
-        subpass_index: u32,
-    ) -> Result<Arc<Pipeline>, vk::Result> {
+    pub fn build(&self, core: &Arc<Core>) -> eyre::Result<Arc<Pipeline>, vk::Result> {
         let viewport_state = vk::PipelineViewportStateCreateInfo::builder().scissor_count(1).viewport_count(1).build();
 
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
 
         let ds_info = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states).build();
 
-        let attachments = renderpass.get_subpasses()[subpass_index as usize]
-            .get_attachments()
+        let render_target = self.render_target.unwrap();
+
+        let attachments = render_target
+            .color_attachments
             .iter()
             .map(|_| vk::PipelineColorBlendAttachmentState {
                 blend_enable: false as u32,
@@ -202,6 +205,12 @@ impl GPipelineBuilder {
 
         let empty_vinfo = VertexInputDescriptionBuilder::new();
 
+        // let mut pipeline_render_create_info = vk::PipelineRenderingCreateInfo::builder()
+        //     .color_attachment_formats(&render_target.color_attachments)
+        //     .depth_attachment_format(render_target.depth_attachment.unwrap_or(vk::Format::UNDEFINED))
+        //     .stencil_attachment_format(render_target.stencil_attachment.unwrap_or(vk::Format::UNDEFINED))
+        //     .build();
+
         let create_info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&self.shader_stages)
             .vertex_input_state(&self.vertex_description.as_ref().unwrap_or(&empty_vinfo).info())
@@ -210,11 +219,12 @@ impl GPipelineBuilder {
             .depth_stencil_state(&self.depth_stencil)
             .dynamic_state(&ds_info)
             .layout(self.pipeline_layout)
-            .render_pass(renderpass.vk_renderpas())
-            .subpass(subpass_index)
             .rasterization_state(&self.rasterizer)
             .viewport_state(&viewport_state)
             .color_blend_state(&color_blend)
+            .render_pass(render_target.get_render_pass())
+            .subpass(render_target.get_subpass_index())
+            // .push_next(&mut pipeline_render_create_info)
             .build();
 
         let pipeline = match unsafe { core.device().create_graphics_pipelines(core.pipeline_cache(), &[create_info], None) }

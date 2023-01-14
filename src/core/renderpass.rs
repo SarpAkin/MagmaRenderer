@@ -9,6 +9,20 @@ use std::{
 use ash::vk::{self};
 use eyre::Result;
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RenderTargetInfo {
+    pub color_attachments: Box<[vk::Format]>,
+    pub depth_attachment: Option<vk::Format>,
+    pub stencil_attachment: Option<vk::Format>,
+    renderpass:vk::RenderPass,
+    subpass_index:u32,
+}
+
+impl RenderTargetInfo{
+    pub fn get_subpass_index(&self) -> u32 {self.subpass_index}
+    pub fn get_render_pass(&self) -> vk::RenderPass {self.renderpass}
+}
+
 use super::{
     core::{Core, Surface},
     is_depth_format, Image,
@@ -21,11 +35,13 @@ enum AttachmentType {
 struct Attachment {}
 
 pub struct Subpass {
-    attachment_formats: Box<[vk::Format]>,
+    // attachment_formats: Box<[vk::Format]>,
+    render_target: RenderTargetInfo,
 }
 
 impl Subpass {
-    pub fn get_attachments(&self) -> &[vk::Format] { &self.attachment_formats }
+    pub fn get_attachments(&self) -> &[vk::Format] { &self.render_target.color_attachments }
+    pub fn get_render_target(&self) -> &RenderTargetInfo { &self.render_target }
 }
 
 pub trait Renderpass: Any {
@@ -212,14 +228,22 @@ impl SurfaceRenderpass {
                 vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
             ],
             subpasses: subpasses
-                .iter()
-                .map(|s| Subpass {
-                    attachment_formats: unsafe {
-                        std::slice::from_raw_parts(s.p_color_attachments, s.color_attachment_count as usize)
-                    }
-                    .iter()
-                    .map(|aref| attachments[aref.attachment as usize].format)
-                    .collect(),
+                .iter().enumerate()
+                .map(|(subpass_index,s)| Subpass {
+                    render_target: RenderTargetInfo {
+                        //
+                        color_attachments: unsafe {
+                            std::slice::from_raw_parts(s.p_color_attachments, s.color_attachment_count as usize)
+                        }
+                        .iter()
+                        .map(|aref| attachments[aref.attachment as usize].format)
+                        .collect(),
+                        depth_attachment: unsafe { s.p_depth_stencil_attachment.as_ref() }
+                            .map(|aref| attachments[aref.attachment as usize].format),
+                        stencil_attachment: None,
+                        renderpass,
+                        subpass_index:subpass_index as u32,
+                    },
                 })
                 .collect(),
         };
@@ -450,15 +474,23 @@ impl RenderPassBuilder {
             width,
             height,
             framebuffer: None,
-            subpasses: self
-                .subpasses
-                .iter()
-                .map(|s| Subpass {
-                    attachment_formats: s
-                        .attachments
+            subpasses: subpasses
+                .iter().enumerate()
+                .map(|(subpass_index,s)| Subpass {
+                    render_target: RenderTargetInfo {
+                        //
+                        color_attachments: unsafe {
+                            std::slice::from_raw_parts(s.p_color_attachments, s.color_attachment_count as usize)
+                        }
                         .iter()
-                        .map(|ar| self.attachments[ar.attachment as usize].description.format)
+                        .map(|aref| attachments[aref.attachment as usize].format)
                         .collect(),
+                        depth_attachment: unsafe { s.p_depth_stencil_attachment.as_ref() }
+                            .map(|aref| attachments[aref.attachment as usize].format),
+                        stencil_attachment: None,
+                        renderpass:render_pass,
+                        subpass_index:subpass_index as u32,
+                    },
                 })
                 .collect(),
             attachments: self.attachments,
@@ -553,7 +585,6 @@ impl Renderpass for MultiPassRenderPass {
 
     fn vk_renderpas(&self) -> vk::RenderPass { self.render_pass }
 
-    
     fn extends(&self) -> (u32, u32) { (self.width, self.height) }
 
     fn core(&self) -> &Arc<Core> { &self.core }

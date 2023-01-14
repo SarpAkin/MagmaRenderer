@@ -24,7 +24,6 @@ pub struct Surface {
     pub height: u32,
 }
 
-
 impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
@@ -236,6 +235,7 @@ impl Core {
             ash::extensions::ext::DebugUtils::name().as_ptr(),
             ash::extensions::khr::Surface::name().as_ptr(),
             ash::extensions::khr::XlibSurface::name().as_ptr(),
+            // ash::extensions::khr::DynamicRendering::name().as_ptr()
         ];
 
         let create_info = vk::InstanceCreateInfo::builder()
@@ -272,22 +272,27 @@ impl Core {
 
         let mut features = vk::PhysicalDeviceFeatures2 {
             features: vk::PhysicalDeviceFeatures {
-                draw_indirect_first_instance: 1,
-
+                draw_indirect_first_instance: vk::TRUE,
                 ..Default::default() //
             },
             ..Default::default()
         };
 
         let mut features12 = vk::PhysicalDeviceVulkan12Features {
-            draw_indirect_count: 1, //
-            ..Default::default()
+            draw_indirect_count: vk::TRUE,
+            ..Default::default() //
+        };
+
+        let mut features13 = vk::PhysicalDeviceVulkan13Features {
+            // dynamic_rendering: vk::TRUE,
+            ..Default::default() //
         };
 
         let device_create_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&device_extension_names)
             .enabled_layer_names(&layer_names)
+            .push_next(&mut features13)
             .push_next(&mut features12)
             .push_next(&mut features)
             .build();
@@ -307,7 +312,7 @@ impl Core {
         let pdevice = Self::pick_physical_device(&instance);
         let (device, graphics_queue, graphics_queue_index) = Self::create_device(&instance, pdevice, &layer_names);
 
-        let  allocator = Allocator::new(&AllocatorCreateDesc {
+        let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
             device: device.clone(),
             physical_device: pdevice,

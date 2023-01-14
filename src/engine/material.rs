@@ -154,7 +154,11 @@ impl MaterialManager {
             let mut dset_builder = DescriptorSetBuilder::new();
             dset_builder
                 .add_sampled_images(&textures.iter().map(|t| (t.as_ref(), *self.default_sampler)).collect::<Vec<_>>());
-            (dset_builder.build(pipeline.pipeline.get_descriptor_set_layout(material_set_index).unwrap(), &mut self.pool)?, material_set_index)
+            (
+                dset_builder
+                    .build(pipeline.pipeline.get_descriptor_set_layout(material_set_index).unwrap(), &mut self.pool)?,
+                material_set_index,
+            )
         } else {
             (vk::DescriptorSet::null(), u32::MAX)
         };
@@ -201,7 +205,7 @@ impl MaterialManager {
             vertex_descriptions: HashMap::new(),
             default_sampler: core.create_sampler(vk::Filter::NEAREST, None),
             pool: DescriptorPool::new(core),
-            mat_id_counter: 1,//0 is reserved for null
+            mat_id_counter: 1, //0 is reserved for null
         })
     }
 
@@ -261,22 +265,24 @@ impl MaterialManager {
         let (layout, dset_layouts) = reflection_data.create_pipeline_layout(&self.core)?;
 
         let mut pipeline_builder = GPipelineBuilder::new();
-        let mut modules = Vec::new();
-        for shader in compiled_shaders {
-            let module = ShaderModule::new(&self.core, &shader.spirv)?;
+        let modules = compiled_shaders
+            .iter()
+            .map(|shader| ShaderModule::new(&self.core, &shader.spirv))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (module, shader) in modules.iter().zip(&compiled_shaders) {
             pipeline_builder.add_shader_stage(shader.stype, &module.module());
-            modules.push(module);
         }
         pipeline_builder.set_pipeline_layout(layout);
         pipeline_builder.set_depth_testing(true);
         pipeline_builder.set_rasterization(vk::PolygonMode::FILL, vk::CullModeFlags::BACK);
         pipeline_builder.set_topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         pipeline_builder.set_descriptor_set_layouts(dset_layouts.into_boxed_slice());
+        pipeline_builder.set_render_target(renderpass.get_subpasses()[subpass_index as usize].get_render_target());
         if let Some(vertex_description) = self.vertex_descriptions.get(&mat_desc.vertex) {
             pipeline_builder.set_vertex_description(vertex_description.clone());
         }
 
-        let pipeline = pipeline_builder.build(&self.core, renderpass, subpass_index)?;
+        let pipeline = pipeline_builder.build(&self.core)?;
 
         Ok(PipelineDetails { pipeline, reflection_data })
     }

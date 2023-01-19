@@ -1,34 +1,33 @@
 use crate::prelude::*;
-use bytemuck::{Pod, cast_slice, cast_slice_mut};
+use bytemuck::{cast_slice, cast_slice_mut, Pod};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc};
-use std::{marker::PhantomData, mem::ManuallyDrop, fmt};
+use std::{fmt, marker::PhantomData, mem::ManuallyDrop};
 
 use super::Core;
 
-pub struct Buffer<T: Pod> {
+struct ByteBuffer {
     buffer: vk::Buffer,
     allocation: ManuallyDrop<Allocation>,
     core: Arc<Core>,
-    size_in_bytes: u32,
-    size_in_items: u32,
-    phantom: PhantomData<T>,
+    size: u64,
     usage: vk::BufferUsageFlags,
 }
 
+pub struct Buffer<T: Pod> {
+    byte_buffer: ByteBuffer,
+    size_in_items: u32,
+    phantom: PhantomData<T>,
+}
+
 impl Core {
-    pub fn create_buffer<T>(
+    fn create_byte_buffer(
         self: &Arc<Self>,
         usage: vk::BufferUsageFlags,
-        size_in_items: u32,
+        size_in_bytes: u64,
         host_visible: bool,
-    ) -> eyre::Result<Buffer<T>>
-    where
-        T: Pod,
-    {
+    ) -> Result<ByteBuffer> {
         unsafe {
             let device = self.device();
-
-            let size_in_bytes = (std::mem::size_of::<T>() as u32) * size_in_items;
 
             let binfo = ash::vk::BufferCreateInfo::builder().size(size_in_bytes as u64).usage(usage).build();
 
@@ -50,18 +49,35 @@ impl Core {
 
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
 
-            Ok(Buffer {
+            Ok(ByteBuffer {
                 buffer,
                 allocation: ManuallyDrop::new(allocation),
                 core: self.clone(),
-                size_in_bytes,
-                size_in_items,
-                phantom: PhantomData,
+                size: size_in_bytes,
                 usage,
             })
         }
     }
 
+    pub fn create_buffer<T>(
+        self: &Arc<Self>,
+        usage: vk::BufferUsageFlags,
+        size_in_items: u32,
+        host_visible: bool,
+    ) -> eyre::Result<Buffer<T>>
+    where
+        T: Pod,
+    {
+        let size_in_bytes = (std::mem::size_of::<T>() as u32) * size_in_items;
+
+        Ok(Buffer {
+            byte_buffer: self.create_byte_buffer(usage, size_in_bytes as u64, host_visible)?,
+            size_in_items,
+            phantom: PhantomData,
+        })
+    }
+
+    //creates a host visible buffer from given slice
     pub fn create_buffer_from_slice<T: Pod>(
         self: &Arc<Self>,
         usage: vk::BufferUsageFlags,
@@ -71,21 +87,61 @@ impl Core {
         buffer.get_data_mut().unwrap()[0..data.len()].copy_from_slice(data);
         Ok(buffer)
     }
+
+    //creates a host visible buffer from given iterator
+    pub fn create_buffer_from_iterator<T: Pod>(
+        self: &Arc<Self>,
+        usage: vk::BufferUsageFlags,
+        iter: impl Iterator<Item = T>,
+    ) -> eyre::Result<Buffer<T>> {
+        let (min_size, max_size) = iter.size_hint();
+        if min_size != max_size.unwrap_or(usize::MAX) {
+            let vec = iter.collect::<Vec<_>>();
+            return self.create_buffer_from_slice(usage, &vec);
+        }
+
+        let mut buffer = self.create_buffer(usage, min_size as u32, true)?; //staging buffer
+
+        let buffer_data = buffer.get_data_mut().unwrap();
+
+        for (item, buffer_storage) in iter.zip(buffer_data) {
+            *buffer_storage = item;
+        }
+
+        Ok(buffer)
+    }
 }
 
 impl<T: Pod> Buffer<T> {
-    pub fn get_usage(&self) -> vk::BufferUsageFlags { self.usage }
-    pub fn get_data(&self) -> Option<&[T]> { self.allocation.mapped_slice().and_then(|s| Some(cast_slice::<u8, T>(s))) }
+    pub fn get_usage(&self) -> vk::BufferUsageFlags { self.byte_buffer.usage }
+    pub fn get_data(&self) -> Option<&[T]> { self.byte_buffer.allocation.mapped_slice().and_then(|s| Some(cast_slice::<u8, T>(s))) }
 
     pub fn get_data_mut(&mut self) -> Option<&mut [T]> {
-        self.allocation.mapped_slice_mut().and_then(|s| Some(cast_slice_mut::<u8, T>(s)))
+        self.byte_buffer.allocation.mapped_slice_mut().and_then(|s| Some(cast_slice_mut::<u8, T>(s)))
     }
 
-    pub fn inner(&self) -> vk::Buffer { self.buffer }
+    pub fn inner(&self) -> vk::Buffer { self.byte_buffer.buffer }
     pub fn as_slice(&self) -> BufferSlice<T> {
         BufferSlice { buffer: self, offset_items: self.offset(), size_items: self.size() }
     }
-    pub fn core(&self) -> &Arc<Core> { &self.core }
+    pub fn core(&self) -> &Arc<Core> { &self.byte_buffer.core }
+
+    pub(crate) fn cast<TOther: Pod>(self) -> Buffer<TOther> {
+        // let old = unsafe {
+        //     ManuallyDrop::take(&mut self)
+        // };
+
+        todo!()
+        // Buffer {
+        //     buffer: self.buffer,
+        //     allocation: self.allocation,
+        //     core: self.core,
+        //     size_in_bytes: self.size_in_bytes,
+        //     size_in_items: self.size_in_bytes / std::mem::size_of::<TOther>() as u32,
+        //     phantom: PhantomData,
+        //     usage: self.usage,
+        // }
+    }
     // pub fn size(&self) -> u32 { self.size_in_items }
 }
 
@@ -109,8 +165,6 @@ pub trait IBufferSlice<T: Pod> {
     }
 }
 
-fn foo(buf: Buffer<u32>) { let a = buf.slice(0, 10).unwrap().slice(0, 10).unwrap(); }
-
 impl<T: Pod> IBufferSlice<T> for Buffer<T> {
     fn buffer(&self) -> &Buffer<T> { self }
     fn size(&self) -> u32 { self.size_in_items }
@@ -123,7 +177,7 @@ impl<'a, T: Pod> IBufferSlice<T> for BufferSlice<'a, T> {
     fn offset(&self) -> u32 { self.offset_items }
 }
 
-impl<T: Pod> Drop for Buffer<T> {
+impl Drop for ByteBuffer {
     fn drop(&mut self) {
         let device = self.core.device();
         let allocation = unsafe { ManuallyDrop::take(&mut self.allocation) };
@@ -142,13 +196,13 @@ pub trait RawBufferSlice {
 }
 
 impl<T: Pod> RawBufferSlice for Buffer<T> {
-    fn raw_buffer(&self) -> vk::Buffer { self.buffer().buffer }
+    fn raw_buffer(&self) -> vk::Buffer { self.buffer().inner() }
     fn byte_size(&self) -> u64 { self.size() as u64 * std::mem::size_of::<T>() as u64 }
     fn byte_offset(&self) -> u64 { self.offset() as u64 * std::mem::size_of::<T>() as u64 }
 }
 
 impl<'a, T: Pod> RawBufferSlice for BufferSlice<'a, T> {
-    fn raw_buffer(&self) -> vk::Buffer { self.buffer().buffer }
+    fn raw_buffer(&self) -> vk::Buffer { self.buffer().inner() }
     fn byte_size(&self) -> u64 { self.size() as u64 * std::mem::size_of::<T>() as u64 }
     fn byte_offset(&self) -> u64 { self.offset() as u64 * std::mem::size_of::<T>() as u64 }
 }

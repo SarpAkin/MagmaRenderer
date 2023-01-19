@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::any::Any;
 
-use super::{cast_to_static_lifetime, core::*,buffer::*, renderpass, Pipeline};
+use crate::prelude::*;
 
-use ash::vk;
+use super::{buffer::*, cast_to_static_lifetime, core::*, renderpass, Pipeline};
+
 use bytemuck::Pod;
 use smallvec::SmallVec;
 
@@ -54,7 +55,7 @@ impl CommandPool {
             dependencies: vec![],
             bound_pipeline: None,
             device: unsafe { cast_to_static_lifetime(self.core.device()) },
-            bound_descriptor_sets: [vk::DescriptorSet::null();4],
+            bound_descriptor_sets: [vk::DescriptorSet::null(); 4],
         }
     }
 
@@ -65,7 +66,7 @@ impl CommandPool {
             dependencies: vec![],
             bound_pipeline: None,
             device: unsafe { cast_to_static_lifetime(self.core.device()) },
-            bound_descriptor_sets: [vk::DescriptorSet::null();4],
+            bound_descriptor_sets: [vk::DescriptorSet::null(); 4],
         }
     }
 }
@@ -79,11 +80,11 @@ impl Drop for CommandPool {
     }
 }
 
-#[allow(dyn_drop)]
+
 pub struct CommandBuffer {
     pool: Arc<CommandPool>,
     cmd: vk::CommandBuffer,
-    dependencies: Vec<Arc<dyn Drop>>,
+    dependencies: Vec<Box<dyn Any>>,
     bound_descriptor_sets: [vk::DescriptorSet; 4],
     bound_pipeline: Option<Arc<Pipeline>>,
     device: &'static ash::Device,
@@ -103,7 +104,7 @@ impl IndexType for u32 {
     fn index_type() -> vk::IndexType { vk::IndexType::UINT32 }
 }
 
-#[allow(dyn_drop)]
+
 impl CommandBuffer {
     pub fn new_secondry(core: &Arc<Core>) -> CommandBuffer { core.create_command_pool().allocate_secondry_cmd() }
     pub fn new(core: &Arc<Core>) -> CommandBuffer { core.create_command_pool().allocate_cmd() }
@@ -113,11 +114,11 @@ impl CommandBuffer {
     pub fn core(&self) -> &Arc<Core> { &self.pool.core }
 
     pub fn inner(&self) -> ash::vk::CommandBuffer { self.cmd }
-    pub fn add_dependency<T>(&mut self, d: &Arc<T>)
+    pub fn add_dependency<T>(&mut self, d:T)
     where
-        T: Drop + 'static,
+        T:Any + 'static,
     {
-        self.dependencies.push(d.clone() as Arc<dyn Drop>);
+        self.dependencies.push(Box::new(d));
     }
 
     pub fn begin(&self) -> Result<(), ash::vk::Result> {
@@ -161,7 +162,7 @@ impl CommandBuffer {
 
     pub fn exectue_secondry(&mut self, cmd: CommandBuffer) {
         unsafe { self.device().cmd_execute_commands(self.inner(), &[cmd.inner()]) };
-        self.add_dependency(&Arc::new(cmd));
+        self.add_dependency(cmd);
     }
 
     pub fn exectue_secondries(&mut self, cmds: Vec<CommandBuffer>) {
@@ -171,7 +172,7 @@ impl CommandBuffer {
         let inner_cmds: SmallVec<[_; 16]> = cmds.iter().map(|c| c.inner()).collect();
         unsafe { self.device().cmd_execute_commands(self.inner(), &inner_cmds) };
 
-        self.add_dependency(&Arc::new(cmds));
+        self.add_dependency(cmds);
     }
 
     pub fn end(&self) -> Result<(), ash::vk::Result> { unsafe { self.pool.core.device().end_command_buffer(self.cmd) } }
@@ -205,7 +206,7 @@ impl CommandBuffer {
         }
 
         pipeline.bind(self.inner());
-        self.bound_pipeline.take().and_then(|p| Some(self.dependencies.push(p as Arc<dyn Drop>)));
+        self.bound_pipeline.take().map(|p| self.add_dependency(p));
 
         self.bound_pipeline = Some(pipeline.clone());
     }
@@ -259,14 +260,28 @@ impl CommandBuffer {
         }
     }
 
-    pub fn gpu_buffer_from_data<T: Pod>(&mut self, data: &[T], usage: vk::BufferUsageFlags) -> eyre::Result<Buffer<T>> {
+    pub fn gpu_buffer_from_slice<T: Pod>(&mut self, usage: vk::BufferUsageFlags, data: &[T]) -> eyre::Result<Buffer<T>> {
         let src: Buffer<T> = self.core().create_buffer_from_slice(usage | vk::BufferUsageFlags::TRANSFER_SRC, data)?;
         let dst: Buffer<T> =
             self.core().create_buffer(usage | vk::BufferUsageFlags::TRANSFER_DST, data.len() as u32, false)?;
 
         self.copy_buffers(&src, &dst);
-        self.add_dependency(&Arc::new(src));
+        self.add_dependency(src);
 
+        Ok(dst)
+    }
+
+    pub fn gpu_buffer_from_iter<T: Pod>(
+        &mut self,
+        usage: vk::BufferUsageFlags,
+        iter: impl Iterator<Item = T>,
+    ) -> Result<Buffer<T>> {
+        let src: Buffer<T> = self.core().create_buffer_from_iterator(usage | vk::BufferUsageFlags::TRANSFER_SRC, iter)?;
+        let dst: Buffer<T> = self.core().create_buffer(usage | vk::BufferUsageFlags::TRANSFER_DST, src.size(), false)?;
+
+        self.copy_buffers(&src, &dst);
+        self.add_dependency(src);
+        
         Ok(dst)
     }
 

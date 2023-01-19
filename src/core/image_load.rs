@@ -23,7 +23,7 @@ impl CommandBuffer {
 
         let image = self.load_image_from_buffer(&buffer, format, out.width, out.height, flags)?;
         
-        self.add_dependency(&Arc::new(buffer));
+        self.add_dependency(buffer);
 
         Ok(image)
     }

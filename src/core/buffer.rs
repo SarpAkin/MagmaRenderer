@@ -114,7 +114,9 @@ impl Core {
 
 impl<T: Pod> Buffer<T> {
     pub fn get_usage(&self) -> vk::BufferUsageFlags { self.byte_buffer.usage }
-    pub fn get_data(&self) -> Option<&[T]> { self.byte_buffer.allocation.mapped_slice().and_then(|s| Some(cast_slice::<u8, T>(s))) }
+    pub fn get_data(&self) -> Option<&[T]> {
+        self.byte_buffer.allocation.mapped_slice().and_then(|s| Some(cast_slice::<u8, T>(s)))
+    }
 
     pub fn get_data_mut(&mut self) -> Option<&mut [T]> {
         self.byte_buffer.allocation.mapped_slice_mut().and_then(|s| Some(cast_slice_mut::<u8, T>(s)))
@@ -124,23 +126,18 @@ impl<T: Pod> Buffer<T> {
     pub fn as_slice(&self) -> BufferSlice<T> {
         BufferSlice { buffer: self, offset_items: self.offset(), size_items: self.size() }
     }
+    pub fn as_raw_buffer_slice(&self) -> &dyn RawBufferSlice {
+        self as &dyn RawBufferSlice
+    }
+
     pub fn core(&self) -> &Arc<Core> { &self.byte_buffer.core }
 
     pub(crate) fn cast<TOther: Pod>(self) -> Buffer<TOther> {
-        // let old = unsafe {
-        //     ManuallyDrop::take(&mut self)
-        // };
-
-        todo!()
-        // Buffer {
-        //     buffer: self.buffer,
-        //     allocation: self.allocation,
-        //     core: self.core,
-        //     size_in_bytes: self.size_in_bytes,
-        //     size_in_items: self.size_in_bytes / std::mem::size_of::<TOther>() as u32,
-        //     phantom: PhantomData,
-        //     usage: self.usage,
-        // }
+        Buffer {
+            size_in_items: (self.byte_buffer.size as usize / std::mem::size_of::<TOther>()) as u32,
+            byte_buffer: self.byte_buffer,
+            phantom: PhantomData,
+        }
     }
     // pub fn size(&self) -> u32 { self.size_in_items }
 }

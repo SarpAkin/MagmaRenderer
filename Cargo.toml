@@ -8,10 +8,8 @@ edition = "2021"
 
 [dependencies]
 ash = "0.37.0+1.3.209"
-# winit = "0.27.2"
 ash-window = "0.11.0"
 bytemuck = { version = "1.12.1", features = ["derive"] }
-# vk-shader-macros = "0.2.8"
 gpu-allocator = "0.18.0"
 eyre = "0.6.8"
 smallvec = "1.10.0"
@@ -25,6 +23,10 @@ serde = { version = "^1.0", features = ["derive"] }
 serde_yaml = "^0.9"
 shaderc = "^0.7.4"
 spirv-reflect = "^0.2.3"
+
+# mesh builder
+glam = "0.22.0"
+
 
 [env]
 RUSTFLAGS = "-A dead_code"

@@ -178,8 +178,8 @@ impl CommandBuffer {
     pub fn end(&self) -> Result<(), ash::vk::Result> { unsafe { self.pool.core.device().end_command_buffer(self.cmd) } }
 
     pub fn bind_vertex_buffers(&mut self, buffers: &[&dyn RawBufferSlice]) {
-        let vbuffers: SmallVec<[_; 4]> = buffers.iter().map(|rb| rb.raw_buffer()).collect();
-        let offsets: SmallVec<[u64; 4]> = buffers.iter().map(|rb| rb.byte_offset() as u64).collect();
+        let vbuffers: SmallVec<[_; 6]> = buffers.iter().map(|rb| rb.raw_buffer()).collect();
+        let offsets: SmallVec<[u64; 6]> = buffers.iter().map(|rb| rb.byte_offset() as u64).collect();
 
         unsafe {
             self.device().cmd_bind_vertex_buffers(self.inner(), 0, &vbuffers, &offsets);

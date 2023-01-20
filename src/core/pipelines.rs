@@ -360,6 +360,15 @@ impl VertexInputDescriptionBuilder {
         });
     }
 
+    pub fn push_attribure_with_format(&mut self, format: vk::Format, offset: u32) {
+        self.attribures.push(vk::VertexInputAttributeDescription {
+            format,
+            binding: self.bindings.last().unwrap().binding,
+            offset,
+            location: self.attribures.len() as u32,
+        });
+    }
+
     pub fn push_attribure<T>(&mut self, _: &T, offset: u32)
     where
         T: GPUFormat,

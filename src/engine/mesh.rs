@@ -1,5 +1,7 @@
 use glam::Vec2;
 use glam::Vec3;
+use serde::Deserialize;
+use serde::Serialize;
 use smallvec::SmallVec;
 
 use crate::core::*;
@@ -8,8 +10,9 @@ use crate::prelude::*;
 use super::pack_RG16_unorm;
 use super::pack_RGB10_A2_snorm;
 
+#[derive(Serialize,Deserialize)]
 pub enum VertexInputTypes {
-    Postion,
+    Position,
     UvCoord,
     Normal,
     Tangent,
@@ -31,9 +34,19 @@ pub struct Mesh {
     uv_coords: Option<Buffer<u8>>, //
     vnormals: Buffer<u8>,
     vtangents: Option<Buffer<u8>>,
+    index_count:u32,
+    vertex_count:u32,
 }
 
 impl Mesh {
+    pub fn index_count(&self) -> u32{
+        self.index_count
+    }
+
+    pub fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
     pub fn has_index_buffer(&self) -> bool {
         match &self.index_buffer {
             IndexBuffer::None => false,
@@ -53,7 +66,7 @@ impl Mesh {
         let buffers = input_types
             .iter()
             .map(|input_type| match input_type {
-                VertexInputTypes::Postion => self.vpositions.as_raw_buffer_slice(),
+                VertexInputTypes::Position => self.vpositions.as_raw_buffer_slice(),
                 VertexInputTypes::UvCoord => self.uv_coords.as_ref().unwrap().as_raw_buffer_slice(),
                 VertexInputTypes::Normal => self.vnormals.as_raw_buffer_slice(),
                 VertexInputTypes::Tangent => self.vtangents.as_ref().unwrap().as_raw_buffer_slice(),
@@ -64,12 +77,12 @@ impl Mesh {
         cmd.bind_vertex_buffers(&buffers);
     }
 
-    pub fn get_vertex_input_description(input_types: &[VertexInputTypes]) {
+    pub fn get_vertex_input_description(input_types: &[VertexInputTypes]) -> VertexInputDescriptionBuilder {
         let mut builder = VertexInputDescriptionBuilder::new();
 
         for input_type in input_types {
             match input_type {
-                VertexInputTypes::Postion => {
+                VertexInputTypes::Position => {
                     builder.push_binding::<[f32; 3]>(vk::VertexInputRate::VERTEX);
                     builder.push_attribure(&[0.0f32; 3], 0);
                 }
@@ -85,6 +98,8 @@ impl Mesh {
                 VertexInputTypes::BoneID => todo!(),
             }
         }
+
+        builder
     }
 }
 
@@ -158,6 +173,8 @@ impl<'a> MeshBuilder<'a> {
                 )?
                 .cast(),
             vtangents: None,
+            index_count: self.indicies.map(|b|b.len()).unwrap_or(0) as u32,
+            vertex_count: vpositions.len() as u32,
         };
 
         Ok(mesh)

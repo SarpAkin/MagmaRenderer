@@ -12,6 +12,9 @@ use spirv_reflect::types::op;
 use crate::core::*;
 use crate::prelude::*;
 
+use super::mesh;
+use super::mesh::VertexInputTypes;
+
 #[derive(Hash, PartialEq, Eq, Clone, Copy)]
 pub struct MaterialID(u32);
 
@@ -26,6 +29,7 @@ struct MaterialData {
     id: MaterialID,
     material_set: vk::DescriptorSet,
     material_set_index: u32,
+    vertex_input_types: Option<Box<[mesh::VertexInputTypes]>>,
 }
 
 pub struct Material<'a> {
@@ -36,6 +40,7 @@ pub struct Material<'a> {
 impl<'a> Material<'a> {
     pub fn pipeline(&self) -> &Arc<Pipeline> { &self.data.pipeline }
     pub fn id(&self) -> MaterialID { self.data.id }
+    pub fn vertex_input_types(&self) -> Option<&Box<[VertexInputTypes]>> { self.data.vertex_input_types.as_ref() }
 }
 
 impl CommandBuffer {
@@ -188,6 +193,10 @@ impl MaterialManager {
             id: material_id,
             material_set,
             material_set_index,
+            vertex_input_types: match mat_desc.vertex {
+                Vertex::Inputs(inputs) => Some(inputs.into_boxed_slice()),
+                Vertex::Name(_) => None,
+            },
         };
 
         self.materials.insert(material_id, material);
@@ -268,8 +277,16 @@ impl MaterialManager {
         pipeline_builder.set_topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         pipeline_builder.set_descriptor_set_layouts(dset_layouts.into_boxed_slice());
         pipeline_builder.set_render_target(&self.render_targets[&mat_desc.subpass]);
-        if let Some(vertex_description) = self.vertex_descriptions.get(&mat_desc.vertex) {
-            pipeline_builder.set_vertex_description(vertex_description.clone());
+
+        match &mat_desc.vertex {
+            Vertex::Inputs(input_types) => {
+                pipeline_builder.set_vertex_description(mesh::Mesh::get_vertex_input_description(input_types));
+            }
+            Vertex::Name(name) => {
+                if let Some(vertex_description) = self.vertex_descriptions.get(name) {
+                    pipeline_builder.set_vertex_description(vertex_description.clone());
+                }
+            }
         }
 
         let pipeline = pipeline_builder.build(&self.core)?;
@@ -338,9 +355,16 @@ impl MaterialManager {
 pub struct MaterialDescripton {
     textures: Vec<String>,
     shaders: Vec<String>,
-    vertex: String,
+    vertex: Vertex,
     material_set: Option<u32>,
     subpass: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Vertex {
+    Inputs(Vec<mesh::VertexInputTypes>),
+    Name(String),
 }
 
 fn get_shader_type(filename: &str) -> Option<vk::ShaderStageFlags> {

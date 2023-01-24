@@ -1,5 +1,7 @@
 pub mod material;
 pub mod mesh;
+pub mod mesh_manager;
+pub mod renderer;
 
 use glam::Vec3;
 use glam::Vec2;

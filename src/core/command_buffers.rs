@@ -80,7 +80,6 @@ impl Drop for CommandPool {
     }
 }
 
-
 pub struct CommandBuffer {
     pool: Arc<CommandPool>,
     cmd: vk::CommandBuffer,
@@ -104,7 +103,6 @@ impl IndexType for u32 {
     fn index_type() -> vk::IndexType { vk::IndexType::UINT32 }
 }
 
-
 impl CommandBuffer {
     pub fn new_secondry(core: &Arc<Core>) -> CommandBuffer { core.create_command_pool().allocate_secondry_cmd() }
     pub fn new(core: &Arc<Core>) -> CommandBuffer { core.create_command_pool().allocate_cmd() }
@@ -114,9 +112,9 @@ impl CommandBuffer {
     pub fn core(&self) -> &Arc<Core> { &self.pool.core }
 
     pub fn inner(&self) -> ash::vk::CommandBuffer { self.cmd }
-    pub fn add_dependency<T>(&mut self, d:T)
+    pub fn add_dependency<T>(&mut self, d: T)
     where
-        T:Any + 'static,
+        T: Any + 'static,
     {
         self.dependencies.push(Box::new(d));
     }
@@ -203,6 +201,24 @@ impl CommandBuffer {
                 //do nothing if pipeline is already bound
                 return;
             }
+        } else {
+            //if the pipeline is'nt already bound bind the descriptor sets
+            for (i, dset) in self.bound_descriptor_sets.iter().enumerate() {
+                if *dset == vk::DescriptorSet::null() {
+                    continue;
+                }
+
+                unsafe {
+                    self.device.cmd_bind_descriptor_sets(
+                        self.inner(),
+                        pipeline.ptype,
+                        pipeline.layout,
+                        i as u32,
+                        &[*dset],
+                        &[],
+                    )
+                }
+            }
         }
 
         pipeline.bind(self.inner());
@@ -220,16 +236,9 @@ impl CommandBuffer {
             }
         }
 
-        unsafe {
-            self.device.cmd_bind_descriptor_sets(
-                self.inner(),
-                self.get_pipeline().ptype,
-                self.get_pipeline().layout,
-                index,
-                &[dset],
-                &[],
-            )
-        }
+        let Some(pipeline) = &self.bound_pipeline else{return};
+
+        unsafe { self.device.cmd_bind_descriptor_sets(self.inner(), pipeline.ptype, pipeline.layout, index, &[dset], &[]) }
     }
 
     pub fn push_constant<T>(&mut self, push: &T, stage_flags: vk::ShaderStageFlags, offset: u32)
@@ -281,7 +290,7 @@ impl CommandBuffer {
 
         self.copy_buffers(&src, &dst);
         self.add_dependency(src);
-        
+
         Ok(dst)
     }
 

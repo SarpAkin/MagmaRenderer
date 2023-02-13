@@ -1,6 +1,7 @@
 use crate::prelude::*;
 
 use std::{
+    fmt,
     mem::ManuallyDrop,
     sync::{Arc, Mutex},
 };
@@ -172,6 +173,10 @@ pub struct Core {
     pub descriptor_set_manager: DescriptorSetManager,
     graphics_queue: ash::vk::Queue,
     graphics_queue_index: u32,
+}
+
+impl fmt::Debug for Core {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { Ok(()) }
 }
 
 unsafe fn as_cstr(s: &[u8]) -> *const i8 { s.as_ptr() as *const i8 }

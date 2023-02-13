@@ -2,7 +2,7 @@ use std::any::Any;
 
 use crate::prelude::*;
 
-use super::{buffer::*, cast_to_static_lifetime, core::*, renderpass, Pipeline};
+use super::{buffer::*, cast_to_static_lifetime, core::*, renderpass, Pipeline, Renderpass};
 
 use bytemuck::Pod;
 use smallvec::SmallVec;
@@ -119,6 +119,25 @@ impl CommandBuffer {
         self.dependencies.push(Box::new(d));
     }
 
+    pub fn begin_renderpass(&mut self, renderpass: &dyn Renderpass, inline: bool) { renderpass.begin(self.inner(), inline) }
+    pub fn next_subpass(&mut self, inline: bool) {
+        let device = self.device();
+        unsafe {
+            device.cmd_next_subpass(
+                self.inner(),
+                inline.then_some(vk::SubpassContents::INLINE).unwrap_or(vk::SubpassContents::SECONDARY_COMMAND_BUFFERS),
+            );
+        }
+    }
+
+    pub fn end_render_pass(&mut self) {
+        let device = self.device();
+
+        unsafe {
+            device.cmd_end_render_pass(self.inner());
+        }
+    }
+
     pub fn begin(&self) -> Result<(), ash::vk::Result> {
         unsafe {
             self.device().begin_command_buffer(
@@ -173,7 +192,7 @@ impl CommandBuffer {
         self.add_dependency(cmds);
     }
 
-    pub fn end(&self) -> Result<(), ash::vk::Result> { unsafe { self.pool.core.device().end_command_buffer(self.cmd) } }
+    pub fn end(&mut self) -> Result<(), ash::vk::Result> { unsafe { self.pool.core.device().end_command_buffer(self.cmd) } }
 
     pub fn bind_vertex_buffers(&mut self, buffers: &[&dyn RawBufferSlice]) {
         let vbuffers: SmallVec<[_; 6]> = buffers.iter().map(|rb| rb.raw_buffer()).collect();
@@ -457,3 +476,7 @@ impl CommandBuffer {
         )
     }
 }
+
+
+
+

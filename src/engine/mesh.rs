@@ -11,6 +11,7 @@ use super::pack_RG16_unorm;
 use super::pack_RGB10_A2_snorm;
 
 #[derive(Serialize,Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum VertexInputTypes {
     Position,
     UvCoord,

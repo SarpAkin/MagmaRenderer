@@ -243,6 +243,7 @@ impl<'a> GPipelineBuilder<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct Pipeline {
     core: Arc<Core>,
     pub pipeline: vk::Pipeline,
